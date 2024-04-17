@@ -1,0 +1,190 @@
+// Copyright 2017 Prometheus Team
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+package write.v2;
+
+// WriteRequest represents a Remote Write 2.0 request to write given time series
+// to remote destination. Note that Remote Write 2.0 requires a content
+// negotiation for version, certain features and compressions, explained in
+// https://docs.google.com/document/d/1jx1fqpRnM0pAndeo3AgY7g6BLxN3Ah8R0Mm8RvNsHoU/edit
+// TODO(bwplotka): Change URL to Prometheus docs once ready.
+message WriteRequest {
+  // symbols contains de-duplicated array of string elements used for various
+  // items in WriteRequest like labels and some metadata items. To decode
+  // each of those items, referenced, by "ref(s)" suffix, you need to lookup the
+  // actual string by index from symbols array. The order of strings is up to
+  // the client, server should not assume any particular encoding.
+  repeated string symbols = 1;
+  // timeseries represents multiple series, potentially from multiple targets.
+  repeated TimeSeries timeseries = 2;
+}
+
+// TimeSeries represents multiple series.
+message TimeSeries {
+  // labels_refs is a sorted list of label name-value pair references, encoded
+  // as indices to the WriteRequest.symbols array. This list's len is always
+  // a multiple of 2.
+  //
+  // Note that there might be multiple TimeSeries objects in the same
+  // WriteRequests with the same labels e.g. for different exemplars, metadata
+  // or created timestamp.
+  repeated uint32 labels_refs = 1;
+  // samples contain zero or more samples for a given timeseries. For a typical
+  // clients, in healthy cases, there will be only one sample, for ~real
+  // time metric streaming.
+  //
+  // Samples are sorted by time (older first).
+  // TODO(bwplotka): Can/should samples and histograms be in enum? Do we allow mix of those in one TimeSeries?
+  repeated Sample samples = 2;
+  // histograms represents zero or more histogram samples for a this series.
+  // TODO(bwplotka): ditto
+  // Histogram samples are sorted by time (older first).
+  repeated Histogram histograms = 3;
+  // exemplars represents optional set of exemplars attached to this series' samples.
+  repeated Exemplar exemplars = 4;
+  // metadata represents the metadata associated with the given series' samples.
+  Metadata metadata = 5;
+  // created_timestamp represents an optional created timestamp associated with
+  // this series' samples in ms format, typically for counter or histogram type
+  // metrics. NOTE: Servers might negotiate "required-created-timestamp" feature
+  // that requires this field to be set for counters and histograms.
+  // For Go, see github.com/prometheus/prometheus/model/timestamp/timestamp.go
+  // for conversion from/to time.Time to Prometheus timestamp.
+  // NOTE: optional key word is omitted due to
+  // https://cloud.google.com/apis/design/design_patterns.md#optional_primitive_fields
+  // Zero value means value not set. If you need to use exactly zero value for
+  // timestamp, use 1 millisecond before or after.
+  int64 created_timestamp = 6;
+}
+
+// Exemplar is an additional information attached to some series' samples.
+// It is typically used to attach an example trace or request ID associated with
+// the metric changes.
+message Exemplar {
+  // labels_refs is a sorted list of label name-value pair references, encoded
+  // as indices to the WriteRequest.symbols array. This list's len is always
+  // a multiple of 2.
+  repeated uint32 labels_refs = 1;
+  // value represents an exact example value. This can be useful when the exemplar
+  // is attached to a histogram, which only gives an estimated value through buckets.
+  double value = 2;
+  // timestamp represents an optional timestamp of the example in ms.
+  // For Go, see github.com/prometheus/prometheus/model/timestamp/timestamp.go
+  // for conversion from/to time.Time to Prometheus timestamp.
+  // NOTE: optional key word is omitted due to
+  // https://cloud.google.com/apis/design/design_patterns.md#optional_primitive_fields
+  // Zero value means value not set. If you need to use exactly zero value for
+  // timestamp, use 1 millisecond before or after.
+  int64 timestamp = 3;
+}
+
+// Sample represents series sample.
+message Sample {
+  // value of the sample.
+  double value = 1;
+  // timestamp represents timestamp of the sample in ms.
+  // For Go, see github.com/prometheus/prometheus/model/timestamp/timestamp.go
+  // for conversion from/to time.Time to Prometheus timestamp.
+  int64 timestamp = 2;
+}
+
+// Metadata represents the metadata associated with the given series' samples.
+message Metadata {
+  enum MetricType {
+    METRIC_TYPE_UNSPECIFIED        = 0;
+    METRIC_TYPE_COUNTER        = 1;
+    METRIC_TYPE_GAUGE          = 2;
+    METRIC_TYPE_HISTOGRAM      = 3;
+    METRIC_TYPE_GAUGEHISTOGRAM = 4;
+    METRIC_TYPE_SUMMARY        = 5;
+    METRIC_TYPE_INFO           = 6;
+    METRIC_TYPE_STATESET       = 7;
+  }
+  MetricType type = 1;
+  // help_ref is a reference to the WriteRequest.symbols array representing help
+  // text for the metric.
+  uint32 help_ref = 3;
+  // unit_ref is a reference to the WriteRequest.symbols array representing unit
+  // for the metric.
+  uint32 unit_ref = 4;
+}
+
+// A native histogram, also known as a sparse histogram.
+// Original design doc:
+// https://docs.google.com/document/d/1cLNv3aufPZb3fNfaJgdaRBZsInZKKIHo9E6HinJVbpM/edit
+// The appendix of this design doc also explains the concept of float
+// histograms. This Histogram message can represent both, the usual
+// integer histogram as well as a float histogram.
+message Histogram {
+  enum ResetHint {
+    RESET_HINT_UNSPECIFIED = 0; // Need to test for a counter reset explicitly.
+    RESET_HINT_YES     = 1; // This is the 1st histogram after a counter reset.
+    RESET_HINT_NO      = 2; // There was no counter reset between this and the previous Histogram.
+    RESET_HINT_GAUGE   = 3; // This is a gauge histogram where counter resets don't happen.
+  }
+
+  oneof count { // Count of observations in the histogram.
+    uint64 count_int   = 1;
+    double count_float = 2;
+  }
+  double sum = 3; // Sum of observations in the histogram.
+  // The schema defines the bucket schema. Currently, valid numbers
+  // are -4 <= n <= 8. They are all for base-2 bucket schemas, where 1
+  // is a bucket boundary in each case, and then each power of two is
+  // divided into 2^n logarithmic buckets. Or in other words, each
+  // bucket boundary is the previous boundary times 2^(2^-n). In the
+  // future, more bucket schemas may be added using numbers < -4 or >
+  // 8.
+  sint32 schema             = 4;
+  double zero_threshold     = 5; // Breadth of the zero bucket.
+  oneof zero_count { // Count in zero bucket.
+    uint64 zero_count_int     = 6;
+    double zero_count_float   = 7;
+  }
+
+  // Negative Buckets.
+  repeated BucketSpan negative_spans =  8;
+  // Use either "negative_deltas" or "negative_counts", the former for
+  // regular histograms with integer counts, the latter for float
+  // histograms.
+  repeated sint64 negative_deltas    =  9; // Count delta of each bucket compared to previous one (or to zero for 1st bucket).
+  repeated double negative_counts    = 10; // Absolute count of each bucket.
+
+  // Positive Buckets.
+  repeated BucketSpan positive_spans = 11;
+  // Use either "positive_deltas" or "positive_counts", the former for
+  // regular histograms with integer counts, the latter for float
+  // histograms.
+  repeated sint64 positive_deltas    = 12; // Count delta of each bucket compared to previous one (or to zero for 1st bucket).
+  repeated double positive_counts    = 13; // Absolute count of each bucket.
+
+  ResetHint reset_hint               = 14;
+  // timestamp represents timestamp of the sample in ms.
+  // For Go, see github.com/prometheus/prometheus/model/timestamp/timestamp.go
+  // for conversion from/to time.Time to Prometheus timestamp.
+  int64 timestamp = 15;
+
+  // TODO(bwplotka): In design process: https://github.com/prometheus/prometheus/issues/13475
+  repeated double custom_bounds =  16;
+}
+
+// A BucketSpan defines a number of consecutive buckets with their
+// offset. Logically, it would be more straightforward to include the
+// bucket counts in the Span. However, the protobuf representation is
+// more compact in the way the data is structured here (with all the
+// buckets in a single array separate from the Spans).
+message BucketSpan {
+  sint32 offset = 1; // Gap to previous span, or starting point for 1st span (which can be negative).
+  uint32 length = 2; // Length of consecutive buckets.
+}
