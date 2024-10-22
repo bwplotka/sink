@@ -31,11 +31,11 @@ Currently, sink supports only [Remote Write 2.0](https://prometheus.io/docs/spec
 
 However, there are things in the scope of this binary, but not implemented yet (help wanted!):
 
-* [] Generic HTTP fault injections (different status codes for certain times).
-* [] Generic `sink/any` for any HTTP streams.
-* [] Semantic sink for OpenTelemetry OTLP.
-* [] Fault injection logic.
-* [] CI for building image.
+* [ ] Generic HTTP fault injections (different status codes for certain times).
+* [ ] Generic `sink/any` for any HTTP streams.
+* [ ] Semantic sink for OpenTelemetry OTLP.
+* [ ] Fault injection logic.
+* [ ] CI for building image.
 
 ## Installing
 
