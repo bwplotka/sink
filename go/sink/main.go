@@ -98,8 +98,12 @@ func newSink(logger *slog.Logger, reg prometheus.Registerer) *sink {
 	}
 }
 
-func (s *sink) Store(_ context.Context, proto remote.WriteProtoFullName, serializedRequest []byte) (w remote.WriteResponseStats, code int, _ error) {
+func (s *sink) Store(_ context.Context, hdrs http.Header, proto remote.WriteProtoFullName, serializedRequest []byte) (w remote.WriteResponseStats, code int, _ error) {
 	s.logger.Debug("received remote write request", slog.String("proto", string(proto)))
+
+	for _, h := range hdrs {
+		fmt.Println(h)
+	}
 
 	switch proto {
 	case remote.WriteProtoFullNameV1:

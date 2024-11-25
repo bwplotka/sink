@@ -29,7 +29,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 	// Create sink.
 	sink := newSink(e, "sink-1", sinkImage, nil)
 	// Create self-scraping Prometheus writing two streams of PRW writes to sink-1: v1 and v2.
-	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:v3.0.0-beta.1", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
+	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:v3.0.0", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
 	testutil.Ok(t, e2e.StartAndWaitReady(sink, prom))
 
 	const expectSamples float64 = 2e3
@@ -184,6 +184,12 @@ remote_write:
   send_exemplars: true
   send_native_histograms: true # Currently broken documentation, should be always true but it's not.
   protobuf_message: io.prometheus.write.v2.Request #v2
+  basic_auth:
+    username: "XXXX"
+    password: "XXXX"
+  headers:
+    "X-Scope-OrgID": "1"
+    "A": "B"
 
 `, name, ports["http"], remoteWriteAddress, remoteWriteAddress)
 	if err := os.WriteFile(filepath.Join(f.Dir(), "prometheus.yml"), []byte(config), 0o600); err != nil {
