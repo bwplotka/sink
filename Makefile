@@ -33,7 +33,7 @@ docker:
 	@export DOCKER_IMAGE=$(DOCKER_IMAGE) DOCKER_TAG=$(DOCKER_TAG) && bash scripts/build-docker.sh $(DOCKER_PUSH)
 
 .PHONY: test
-test:
+test: docker
 	@for gomod in $(GOMODS); do \
 		cd $$gomod && go test -v ./...; \
     done

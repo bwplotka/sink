@@ -29,7 +29,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 	// Create sink.
 	sink := newSink(e, "sink-1", sinkImage, nil)
 	// Create self-scraping Prometheus writing two streams of PRW writes to sink-1: v1 and v2.
-	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:v3.0.0-beta.1", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
+	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:v3.1.0", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
 	testutil.Ok(t, e2e.StartAndWaitReady(sink, prom))
 
 	const expectSamples float64 = 2e3
@@ -68,6 +68,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 				promAllReqsSent += promReqsSent[0]
 				sinkReqsRecv, err := sink.SumMetrics([]string{"sink_received_data_elements"},
 					e2emon.WithLabelMatchers(
+						&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "proto", Value: string(ver.proto), Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "data", Value: "series", Type: matchers.MatchEqual},
 					),
@@ -84,6 +85,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 				testutil.Ok(t, err)
 				sinkSamplesRecv, err := sink.SumMetrics([]string{"sink_received_data_elements"},
 					e2emon.WithLabelMatchers(
+						&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "proto", Value: string(ver.proto), Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "data", Value: "samples", Type: matchers.MatchEqual},
 					))
@@ -99,6 +101,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 				testutil.Ok(t, err)
 				sinkHistRecv, err := sink.SumMetrics([]string{"sink_received_data_elements"},
 					e2emon.WithLabelMatchers(
+						&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "proto", Value: string(ver.proto), Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "data", Value: "histograms", Type: matchers.MatchEqual},
 					))
@@ -107,17 +110,38 @@ func TestSink_PrometheusWriting(t *testing.T) {
 					t.Fatal("in sink, expected non zero histograms", promHistSent, "but got", sinkHistRecv)
 				}
 			})
+
+			// TODO(bwplotka): Cannot make metadata to work; expect errors; to debug.
+			t.Run("metadata-issues", func(t *testing.T) {
+				if ver.proto == remote.WriteProtoFullNameV1 {
+					t.Skip("v1 does not support metadata")
+				}
+				promHistSent, err := prom.SumMetrics([]string{"prometheus_remote_storage_histograms_total"},
+					e2emon.WithLabelMatchers(&matchers.Matcher{Name: "remote_name", Value: ver.remoteName, Type: matchers.MatchEqual}))
+				testutil.Ok(t, err)
+				sinkHistRecv, err := sink.SumMetrics([]string{"sink_received_data_issues"},
+					e2emon.WithLabelMatchers(
+						&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
+						&matchers.Matcher{Name: "proto", Value: string(ver.proto), Type: matchers.MatchEqual},
+						&matchers.Matcher{Name: "issue", Value: "series-untyped", Type: matchers.MatchEqual},
+					))
+				testutil.Ok(t, err)
+				if promHistSent[0] <= 0 || sinkHistRecv[0] < promHistSent[0] {
+					t.Fatal("in sink, expected non zero series without type", promHistSent, "but got", sinkHistRecv)
+				}
+			})
 		})
 	}
 
 	got, err := sink.SumMetrics([]string{"http_requests_total"},
 		e2emon.WithLabelMatchers(
+			&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
 			&matchers.Matcher{Name: "handler", Value: "/sink/prw", Type: matchers.MatchEqual},
 			&matchers.Matcher{Name: "code", Value: "204", Type: matchers.MatchEqual},
 		))
 	testutil.Ok(t, err)
 	if got[0] < promAllReqsSent {
-		t.Fatal("in sink, expected not less succesful request than", promAllReqsSent, "but got", got)
+		t.Fatal("in sink, expected not less successful request than", promAllReqsSent, "but got", got)
 	}
 
 	// Expect no failures on sender side.
@@ -175,13 +199,19 @@ scrape_configs:
 
 remote_write:
 - url: %q
+  headers:
+    "X-SINK-SOURCE": source1
   name: v1-to-sink
   send_exemplars: true
   send_native_histograms: true
   protobuf_message: prometheus.WriteRequest #v1
 - url: %q
+  headers:
+    "X-SINK-SOURCE": source1  
   name: v2-to-sink
   send_exemplars: true
+  metadata_config:
+    send: true
   send_native_histograms: true # Currently broken documentation, should be always true but it's not.
   protobuf_message: io.prometheus.write.v2.Request #v2
 
