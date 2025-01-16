@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 
 	writev1 "github.com/bwplotka/sink/go/sink/genproto/prometheus/v1"
@@ -26,17 +27,13 @@ const (
 	histogramsData = "histograms"
 	exemplarsData  = "exemplars"
 
-	seriesWithoutTypeIssue   = "series-untyped"
-	seriesWithoutHelpIssue   = "series-without-help"
-	seriesWithoutUnitIssue   = "series-without-unit"
-	cumulativeWithoutCTIssue = "cumulative-without-ct"
-
 	sourceHeader = "X-SINK-SOURCE"
 )
 
 func main() {
 	logLevelFlag := flag.String("log.level", "info", "Logging level, available values: 'debug', 'info', 'warn', 'error'.")
-	addr := flag.String("listen-address", ":9011", "Address to listen on. Available HTTP paths: /metrics, /-/ready, /-/health, /sink/prw")
+	logIssuesFlag := flag.String("log.issues", "", fmt.Sprintf("Comma separate issue types to log. Set to '*' for all issue logging. Available values: %v", allIssues))
+	addrFlag := flag.String("listen-address", ":9011", "Address to listen on. Available HTTP paths: /metrics, /-/ready, /-/health, /sink/prw")
 
 	flag.Parse()
 
@@ -56,17 +53,22 @@ func main() {
 	var g run.Group
 	{
 		healthHandler := health.New(health.Health{}).Handler
-		httpSrv := &http.Server{Addr: *addr}
+		httpSrv := &http.Server{Addr: *addrFlag}
 		http.HandleFunc("/-/health", healthHandler)
 		http.HandleFunc("/-/ready", healthHandler)
 		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
 			EnableOpenMetrics: true,
 		}))
-		s := newSink(logger, reg)
+
+		logIssues := strings.Split(*logIssuesFlag, ",")
+		if *logIssuesFlag == "*" {
+			logIssues = allIssuesStrings
+		}
+		s := newSink(logger, logIssues, reg)
 		http.HandleFunc("/sink/prw",
 			detectSource(instrument(reg, "/sink/prw", remote.NewRemoteWriteHandler(logger, s))))
 		g.Add(func() error {
-			logger.Info("starting HTTP server", "address", *addr)
+			logger.Info("starting HTTP server", "address", *addrFlag)
 			return httpSrv.ListenAndServe()
 		}, func(_ error) {
 			_ = httpSrv.Shutdown(context.Background())
@@ -151,7 +153,7 @@ func newSinkMetrics(reg prometheus.Registerer) sinkMetrics {
 					{Name: "source", Constraint: sourceConstraintFn},
 					{Name: "proto", Constraint: protoConstraintFn},
 					{Name: "issue", Constraint: func(v string) string {
-						switch v {
+						switch issue(v) {
 						case seriesWithoutTypeIssue, seriesWithoutHelpIssue, seriesWithoutUnitIssue, cumulativeWithoutCTIssue:
 							return v
 						default:
@@ -168,13 +170,19 @@ func newSinkMetrics(reg prometheus.Registerer) sinkMetrics {
 
 type sink struct {
 	sinkMetrics
-	logger *slog.Logger
+
+	logger   *slog.Logger
+	reporter *issueReporter
 }
 
-func newSink(logger *slog.Logger, reg prometheus.Registerer) *sink {
+func newSink(logger *slog.Logger, logIssues []string, reg prometheus.Registerer) *sink {
+	if len(logIssues) == 1 && logIssues[0] == "" {
+		logIssues = nil // Common strings.Split result.
+	}
 	return &sink{
 		sinkMetrics: newSinkMetrics(reg),
 		logger:      logger,
+		reporter:    newIssueReporter(logIssues),
 	}
 }
 
@@ -200,24 +208,18 @@ func getSource(ctx context.Context) string {
 	return ret
 }
 
-func (s *sink) Store(ctx context.Context, proto remote.WriteProtoFullName, serializedRequest []byte) (w remote.WriteResponseStats, code int, _ error) {
+func (s *sink) Store(ctx context.Context, protoName remote.WriteProtoFullName, serializedRequest []byte) (w remote.WriteResponseStats, code int, _ error) {
 	source := getSource(ctx)
 
 	var (
-		series               int
-		encoded              fmt.Stringer
-		noTypeSeries         int
-		noHelpSeries         int
-		noUnitSeries         int
-		noCTCumulativeSeries int
+		series int
 	)
-	switch proto {
+	switch protoName {
 	case remote.WriteProtoFullNameV1:
 		r := &writev1.WriteRequest{}
 		if err := r.UnmarshalVT(serializedRequest); err != nil {
 			return w, http.StatusInternalServerError, fmt.Errorf("decoding v1 request %w", err)
 		}
-		encoded = r
 		series = len(r.Timeseries)
 		for _, ts := range r.Timeseries {
 			w.Samples += len(ts.Samples)
@@ -227,75 +229,50 @@ func (s *sink) Store(ctx context.Context, proto remote.WriteProtoFullName, seria
 
 	case remote.WriteProtoFullNameV2:
 		r := &writev2.Request{}
+
 		if err := r.UnmarshalVT(serializedRequest); err != nil {
 			return w, http.StatusInternalServerError, fmt.Errorf("decoding v2 request %w", err)
 		}
-		encoded = r
+
+		issues := s.reporter.newRequest(s.logger, r)
+
 		series = len(r.Timeseries)
-		for _, ts := range r.Timeseries {
+		for i, ts := range r.Timeseries {
 			w.Samples += len(ts.Samples)
 			w.Histograms += len(ts.Histograms)
 			w.Exemplars += len(ts.Exemplars)
 
 			if ts.Metadata.HelpRef == 0 {
-				noHelpSeries++
+				issues.report(seriesWithoutHelpIssue, i)
 			}
 			if ts.Metadata.UnitRef == 0 {
-				noUnitSeries++
+				issues.report(seriesWithoutUnitIssue, i)
 			}
 			if ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_UNSPECIFIED {
-				noTypeSeries++
+				issues.report(seriesWithoutTypeIssue, i)
 			} else if ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_COUNTER ||
 					ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_HISTOGRAM ||
 					ts.Metadata.Type == writev2.Metadata_METRIC_TYPE_SUMMARY {
 				if ts.CreatedTimestamp == 0 {
-					noCTCumulativeSeries++
+					issues.report(cumulativeWithoutCTIssue, i)
 				}
 			}
 		}
+
+		issues.commit(s.recvDataIssues, source, string(protoName), series, w)
 	default:
-		return w, http.StatusInternalServerError, fmt.Errorf("expected proto full names validated; got unknown one %v", proto)
+		return w, http.StatusInternalServerError, fmt.Errorf("expected proto full names validated; got unknown one %v", protoName)
 	}
 
-	s.recvData.WithLabelValues(source, string(proto), seriesData).Observe(float64(series))
+	s.recvData.WithLabelValues(source, string(protoName), seriesData).Observe(float64(series))
 	if w.Samples > 0 {
-		s.recvData.WithLabelValues(source, string(proto), samplesData).Observe(float64(w.Samples))
+		s.recvData.WithLabelValues(source, string(protoName), samplesData).Observe(float64(w.Samples))
 	}
 	if w.Histograms > 0 {
-		s.recvData.WithLabelValues(source, string(proto), histogramsData).Observe(float64(w.Histograms))
+		s.recvData.WithLabelValues(source, string(protoName), histogramsData).Observe(float64(w.Histograms))
 	}
 	if w.Exemplars > 0 {
-		s.recvData.WithLabelValues(source, string(proto), exemplarsData).Observe(float64(w.Exemplars))
-	}
-	if noTypeSeries > 0 {
-		s.recvDataIssues.WithLabelValues(source, string(proto), seriesWithoutTypeIssue).Observe(float64(noTypeSeries))
-	}
-	if noHelpSeries > 0 {
-		s.recvDataIssues.WithLabelValues(source, string(proto), seriesWithoutHelpIssue).Observe(float64(noHelpSeries))
-	}
-	if noUnitSeries > 0 {
-		s.recvDataIssues.WithLabelValues(source, string(proto), seriesWithoutUnitIssue).Observe(float64(noUnitSeries))
-	}
-	if noCTCumulativeSeries > 0 {
-		s.recvDataIssues.WithLabelValues(source, string(proto), cumulativeWithoutCTIssue).Observe(float64(noCTCumulativeSeries))
-	}
-
-	if s.logger.Enabled(ctx, slog.LevelDebug) {
-		// Converting message to string is expensive, do this only if debug is actually enabled.
-		s.logger.Debug(
-			"received remote write request",
-			slog.String("source", source),
-			slog.String("proto", string(proto)),
-			slog.Int(seriesData, series),
-			slog.Int(samplesData, w.Samples),
-			slog.Int(histogramsData, w.Histograms),
-			slog.Int(exemplarsData, w.Exemplars),
-			slog.Int(seriesWithoutTypeIssue, noTypeSeries),
-			slog.Int(seriesWithoutHelpIssue, noHelpSeries),
-			slog.Int(seriesWithoutUnitIssue, noUnitSeries),
-			slog.Int(cumulativeWithoutCTIssue, noCTCumulativeSeries),
-			slog.String("decoded", encoded.String()),
-		)
+		s.recvData.WithLabelValues(source, string(protoName), exemplarsData).Observe(float64(w.Exemplars))
 	}
 	return w, http.StatusOK, nil
 }
