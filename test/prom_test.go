@@ -29,7 +29,7 @@ func TestSink_PrometheusWriting(t *testing.T) {
 	// Create sink.
 	sink := newSink(e, "sink-1", sinkImage, nil)
 	// Create self-scraping Prometheus writing two streams of PRW writes to sink-1: v1 and v2.
-	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:v3.1.0", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
+	prom := newPrometheus(e, "prom-1", "quay.io/prometheus/prometheus:main", fmt.Sprintf("http://%s/sink/prw", sink.InternalEndpoint("http")), nil)
 	testutil.Ok(t, e2e.StartAndWaitReady(sink, prom))
 
 	const expectSamples float64 = 2e3
@@ -46,9 +46,9 @@ func TestSink_PrometheusWriting(t *testing.T) {
 
 	// Uncomment for the interactive run (test will run until you kill the test or hit endpoint that was logged)
 	// so you can explore Prometheus UI and sink metrics.
-	// testutil.Ok(t, e2einteractive.OpenInBrowser("http://"+prom.Endpoint("http"))) // Open Prometheus UI
-	// testutil.Ok(t, e2einteractive.OpenInBrowser("http://"+sink.Endpoint("http")+"/metrics"))
-	// testutil.Ok(t, e2einteractive.RunUntilEndpointHit())
+	//testutil.Ok(t, e2einteractive.OpenInBrowser("http://"+prom.Endpoint("http"))) // Open Prometheus UI
+	//testutil.Ok(t, e2einteractive.OpenInBrowser("http://"+sink.Endpoint("http")+"/metrics"))
+	//testutil.Ok(t, e2einteractive.RunUntilEndpointHit())
 
 	promAllReqsSent := 0.0
 	// Match sender with receiver.
@@ -111,23 +111,38 @@ func TestSink_PrometheusWriting(t *testing.T) {
 				}
 			})
 
-			// TODO(bwplotka): Cannot make metadata to work; expect errors; to debug.
 			t.Run("metadata-issues", func(t *testing.T) {
 				if ver.proto == remote.WriteProtoFullNameV1 {
 					t.Skip("v1 does not support metadata")
 				}
-				promHistSent, err := prom.SumMetrics([]string{"prometheus_remote_storage_histograms_total"},
-					e2emon.WithLabelMatchers(&matchers.Matcher{Name: "remote_name", Value: ver.remoteName, Type: matchers.MatchEqual}))
+				sinkHistRecv, err := sink.SumMetrics([]string{"sink_received_data_issues"},
+					e2emon.WithLabelMatchers(
+						&matchers.Matcher{Name: "issue", Value: "series-untyped", Type: matchers.MatchEqual},
+					),
+					e2emon.SkipMissingMetrics(),
+				)
+				testutil.Ok(t, err)
+				if sinkHistRecv[0] > 0 {
+					t.Fatal("in sink, expected zero series without type, but got", sinkHistRecv)
+				}
+			})
+			t.Run("ct-issues", func(t *testing.T) {
+				if ver.proto == remote.WriteProtoFullNameV1 {
+					t.Skip("v1 does not support ct")
+				}
+				promReqsSent, err := prom.SumMetrics([]string{"prometheus_remote_storage_sent_batch_duration_seconds"},
+					e2emon.WithLabelMatchers(&matchers.Matcher{Name: "remote_name", Value: ver.remoteName, Type: matchers.MatchEqual}),
+					e2emon.WithMetricCount())
 				testutil.Ok(t, err)
 				sinkHistRecv, err := sink.SumMetrics([]string{"sink_received_data_issues"},
 					e2emon.WithLabelMatchers(
 						&matchers.Matcher{Name: "source", Value: "source1", Type: matchers.MatchEqual},
 						&matchers.Matcher{Name: "proto", Value: string(ver.proto), Type: matchers.MatchEqual},
-						&matchers.Matcher{Name: "issue", Value: "series-untyped", Type: matchers.MatchEqual},
+						&matchers.Matcher{Name: "issue", Value: "cumulative-without-ct", Type: matchers.MatchEqual},
 					))
 				testutil.Ok(t, err)
-				if promHistSent[0] <= 0 || sinkHistRecv[0] < promHistSent[0] {
-					t.Fatal("in sink, expected non zero series without type", promHistSent, "but got", sinkHistRecv)
+				if promReqsSent[0] <= 0 || sinkHistRecv[0] < promReqsSent[0] {
+					t.Fatal("in sink, expected non zero cumulative series without CT", promReqsSent, "but got", sinkHistRecv)
 				}
 			})
 		})
@@ -168,7 +183,8 @@ func newSink(e e2e.Environment, name, image string, flagOverride map[string]stri
 	f := e.Runnable(name).WithPorts(ports).Future()
 	args := map[string]string{
 		"-listen-address": fmt.Sprintf(":%d", ports["http"]),
-		"--log.level":     "info",
+		"-log.level":      "info",
+		"-log.issues":     "series-untyped",
 	}
 	if flagOverride != nil {
 		args = e2e.MergeFlagsWithoutRemovingEmpty(args, flagOverride)
@@ -210,8 +226,6 @@ remote_write:
     "X-SINK-SOURCE": source1  
   name: v2-to-sink
   send_exemplars: true
-  metadata_config:
-    send: true
   send_native_histograms: true # Currently broken documentation, should be always true but it's not.
   protobuf_message: io.prometheus.write.v2.Request #v2
 
