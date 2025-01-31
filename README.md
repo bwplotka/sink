@@ -5,11 +5,13 @@ An efficient binary, with predictive latency, for receiving streams of data for 
 In the future fault injection logic is planned, see [functionality](#functionality) to learn more.
 
 ```bash mdox-exec="bash scripts/format_help.sh"
-Usage of sink:
+Usage of /bin/sink:
   -listen-address string
-    	Address to listen on. Available HTTP paths: /metrics, /-/ready, /-/health, /sink/prw (default ":9011")
+        Address to listen on. Available HTTP paths: /metrics, /-/ready, /-/health, /sink/prw (default ":9011")
+  -log.issues string
+        Comma separate issue types to log. Set to '*' for all issue logging. Available values: [series-untyped series-without-help series-without-unit cumulative-without-ct]
   -log.level string
-    	Logging level, available values: 'debug', 'info', 'warn', 'error'. (default "info")
+        Logging level, available values: 'debug', 'info', 'warn', 'error'. (default "info")
 ```
 
 Check our [test/prom_test.go](./test/prom_test.go) test to see end-to-end example on how it can be used, with docker and Prometheus.
